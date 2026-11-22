@@ -28,6 +28,16 @@ class Store:
         self._anomaly_records: list[dict[str, Any]] = []
         # Recalc history
         self._recalc_history: list[dict[str, Any]] = []
+        # 查询模板执行留痕（按模板 id 归集，空行成功与执行失败都可追溯）
+        self._template_executions: dict[int, list[dict[str, Any]]] = {}
+        # 数据服务交付批次（批次 id -> 批次详情）
+        self._delivery_batches: dict[int, dict[str, Any]] = {}
+        # 查询模板执行故障注入（模板 id -> 故障原因），模拟模板无法执行
+        self._template_faults: dict[int, str] = {}
+        # 自增序列
+        self._execution_seq = 0
+        self._delivery_seq = 0
+        self._batch_seq_by_api: dict[int, int] = {}
         # Lock for thread safety
         self._lock = threading.Lock()
 
@@ -175,6 +185,87 @@ class Store:
 
     def recalc_history(self) -> list[dict[str, Any]]:
         return self._recalc_history
+
+    # ── 查询模板执行留痕 ──
+
+    def next_execution_id(self) -> str:
+        """生成全局唯一的模板执行结论编号（结果身份的一部分）。"""
+        self._execution_seq += 1
+        return f"EXE-{self._execution_seq:06d}"
+
+    def save_template_execution(self, record: dict[str, Any]) -> dict[str, Any]:
+        """保存一次模板执行结论。成功（含空行集）与失败都必须留痕。"""
+        template_id = int(record.get("template_id", 0))
+        self._template_executions.setdefault(template_id, []).append(record)
+        return record
+
+    def get_template_execution(self, execution_id: str) -> dict[str, Any] | None:
+        for records in self._template_executions.values():
+            for record in records:
+                if record.get("execution_id") == execution_id:
+                    return record
+        return None
+
+    def get_template_executions(self, template_id: int) -> list[dict[str, Any]]:
+        """读取某模板的全部历史执行结论，按发生时间排列。"""
+        return list(self._template_executions.get(int(template_id), []))
+
+    def clear_template_executions(self, template_id: int | None = None) -> None:
+        """清除模板执行留痕；不传 id 时清除全部（主要用于测试隔离与重算复位）。"""
+        if template_id is None:
+            self._template_executions.clear()
+        else:
+            self._template_executions.pop(int(template_id), None)
+
+    # ── 数据服务交付批次 ──
+
+    def next_batch_no(self, api_id: int) -> int:
+        """同一数据服务内批次序号递增，用于跨响应核对批次身份。"""
+        seq = self._batch_seq_by_api.get(api_id, 0) + 1
+        self._batch_seq_by_api[api_id] = seq
+        return seq
+
+    def next_delivery_id(self) -> str:
+        self._delivery_seq += 1
+        return f"DLV-{self._delivery_seq:06d}"
+
+    def save_delivery_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        self._delivery_batches[int(batch["batch_id"])] = batch
+        return batch
+
+    def get_delivery_batch(self, batch_id: int) -> dict[str, Any] | None:
+        return self._delivery_batches.get(int(batch_id))
+
+    def list_delivery_batches(self, api_id: int | None = None) -> list[dict[str, Any]]:
+        batches = list(self._delivery_batches.values())
+        if api_id is not None:
+            batches = [b for b in batches if int(b.get("api_id", 0)) == int(api_id)]
+        return sorted(batches, key=lambda b: int(b.get("batch_id", 0)))
+
+    def clear_delivery_batches(self, api_id: int | None = None) -> None:
+        """清除交付批次；不传 api_id 时清除全部（主要用于测试隔离）。"""
+        if api_id is None:
+            self._delivery_batches.clear()
+            self._batch_seq_by_api.clear()
+        else:
+            for batch_id in list(self._delivery_batches):
+                if int(self._delivery_batches[batch_id].get("api_id", 0)) == int(api_id):
+                    self._delivery_batches.pop(batch_id, None)
+            self._batch_seq_by_api.pop(int(api_id), None)
+
+    # ── 查询模板故障注入（用于模拟模板无法执行与修复后重试） ──
+
+    def set_template_fault(self, template_id: int, reason: str) -> None:
+        self._template_faults[int(template_id)] = reason
+
+    def clear_template_fault(self, template_id: int) -> bool:
+        return self._template_faults.pop(int(template_id), None) is not None
+
+    def get_template_fault(self, template_id: int) -> str | None:
+        return self._template_faults.get(int(template_id))
+
+    def template_faults(self) -> dict[int, str]:
+        return dict(self._template_faults)
 
     # ── Data artifacts for cross-module consumption ──
 

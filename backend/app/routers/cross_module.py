@@ -67,11 +67,72 @@ def execute_query(template_id: int, operator: str = "系统"):
     return svc.execute_query(template_id, operator=operator)
 
 
+@router.get("/query/{template_id}/executions")
+def query_execution_history(template_id: int):
+    """读取模板的全部执行结论（成功含空行、失败原因均可追溯）"""
+    svc = QueryBuilderService()
+    return svc.get_execution_history(template_id)
+
+
+@router.get("/query/execution/{execution_id}")
+def query_execution_detail(execution_id: str):
+    """按执行编号读取一次模板执行结论（空行集也能追溯到成功执行）"""
+    svc = QueryBuilderService()
+    result = svc.get_execution(execution_id)
+    if result is None:
+        return {"error": f"执行结论 {execution_id} 不存在"}
+    return result
+
+
+@router.post("/query/{template_id}/fault")
+def inject_query_fault(template_id: int, reason: str):
+    """对查询模板注入执行故障，模拟模板无法执行"""
+    svc = QueryBuilderService()
+    return svc.set_fault(template_id, reason)
+
+
+@router.post("/query/{template_id}/fault/clear")
+def clear_query_fault(template_id: int):
+    """修复查询模板：解除故障，恢复后可重新执行"""
+    svc = QueryBuilderService()
+    return svc.clear_fault(template_id)
+
+
 @router.post("/data-service/{api_id}/call")
-def call_data_service(api_id: int, operator: str = "客户端"):
-    """调用数据服务API"""
+def call_data_service(api_id: int, operator: str = "客户端",
+                      resume_from_batch: int | None = None):
+    """调用数据服务API，返回续取批次与每模板交付明细。
+
+    resume_from_batch 传入历史批次 id 时进入续取：已签收结果沿用原结果身份，
+    仅重跑未交付项。
+    """
     svc = DataServiceService()
-    return svc.call_service(api_id, operator=operator)
+    return svc.call_service(api_id, operator=operator,
+                            resume_from_batch=resume_from_batch)
+
+
+@router.get("/data-service/batches")
+def list_delivery_batches(api_id: int | None = None):
+    """列出数据服务交付批次，供跨响应核对批次身份"""
+    svc = DataServiceService()
+    return {"items": svc.list_delivery_batches(api_id)}
+
+
+@router.get("/data-service/batch/{batch_id}")
+def get_delivery_batch(batch_id: int):
+    """按批次身份读取交付批次完整详情（含各模板交付明细与行数据）"""
+    svc = DataServiceService()
+    batch = svc.get_delivery_batch(batch_id)
+    if batch is None:
+        return {"error": f"交付批次 {batch_id} 不存在"}
+    return batch
+
+
+@router.get("/data-service/batch/{batch_id}/pending")
+def get_pending_deliveries(batch_id: int):
+    """从批次恢复待交付项：未交付模板及对应失败原因"""
+    svc = DataServiceService()
+    return svc.get_pending_deliveries(batch_id)
 
 
 @router.get("/data-service/{api_id}/health")
